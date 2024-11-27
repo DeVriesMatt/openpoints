@@ -319,10 +319,12 @@ class KNNGroup(nn.Module):
         else:
             return grouped_xyz, None
 
-
+import sys
 def get_aggregation_feautres(p, dp, f, fj, feature_type='dp_fj'):
     if feature_type == 'dp_fj':
+
         fj = torch.cat([dp, fj], 1)
+
     elif feature_type == 'dp_fj_df':
         df = fj - f.unsqueeze(-1)
         fj = torch.cat([dp, fj, df], 1)

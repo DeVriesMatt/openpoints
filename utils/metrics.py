@@ -109,6 +109,29 @@ class ConfusionMatrix:
         return actual.sum() + self.tp - (actual + predicted)
 
     @property
+    def precision(self):
+        """Calculate precision per class."""
+        return self.tp / (self.tp + self.fp).clamp(min=1)
+
+    @property
+    def recall(self):
+        """Calculate recall per class."""
+        return self.tp / (self.tp + self.fn).clamp(min=1)
+
+    @property
+    def f1(self):
+        """Calculate F1 score per class."""
+        precision = self.precision
+        recall = self.recall
+        return 2 * (precision * recall) / (precision + recall).clamp(min=1e-9)
+
+    @property
+    def macro_f1(self):
+        """Calculate the macro-average F1 score."""
+        f1_per_class = self.f1
+        return torch.mean(f1_per_class).item() * 100
+
+    @property
     def count(self):  # a.k.a. actual positive class
         """Get the number of samples per-class."""
         # return self.tp + self.fn

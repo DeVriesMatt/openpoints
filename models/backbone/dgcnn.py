@@ -21,7 +21,8 @@ class DGCNN(nn.Module):
                  norm_args={'norm': 'bn'},
                  act_args={'act': 'leakyrelu', 'negative_slope': 0.2},
                  conv_args={'order': 'conv-norm-act'},
-                 is_seg=False, 
+                 is_seg=False,
+                 is_mil=True,
                  **kwargs
                  ):
         """
@@ -45,6 +46,7 @@ class DGCNN(nn.Module):
             logging.warning(f"kwargs: {kwargs} are not used in {__class__.__name__}")
 
         self.n_blocks = n_blocks
+        self.is_mil = is_mil
 
         self.knn = DilatedKNN(k, 1)
         self.head = GraphConv(in_channels, channels, conv,
@@ -101,6 +103,9 @@ class DGCNN(nn.Module):
             feats.append(self.backbone[i](feats[-1]))
         feats = torch.cat(feats, dim=1).squeeze(-1)
         fusion = self.fusion_block(feats)
+        if self.is_mil:
+            return fusion
+
         return torch.cat((self.maxpool(fusion), self.avgpool(fusion)), dim=1)
 
 

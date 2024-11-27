@@ -3,7 +3,7 @@ import torch.nn as nn
 import logging
 from typing import List
 from ..layers import create_linearblock
-from ...utils import get_missing_parameters_message, get_unexpected_parameters_message
+from ...utils import get_missing_parameters_message, get_unexpected_parameters_message, print_args
 from ..build import MODELS, build_model_from_cfg
 from ...loss import build_criterion_from_cfg
 from ...utils import load_checkpoint
@@ -37,6 +37,9 @@ class BaseCls(nn.Module):
     def get_logits_loss(self, data, gt):
         logits = self.forward(data)
         return logits, self.criterion(logits, gt.long())
+
+    def interpret(self, x):
+        return x['interpretation']
 
 
 @MODELS.register_module()
@@ -85,6 +88,8 @@ class ClsHead(nn.Module):
                  dropout: float=0.5,
                  global_feat: str=None,
                  point_dim: int=2,
+                 pooling: str=None,
+                 is_mil: bool=None,
                  **kwargs
                  ):
         """A general classification head. supports global pooling and [CLS] token
@@ -121,9 +126,81 @@ class ClsHead(nn.Module):
                 heads.append(nn.Dropout(dropout))
         heads.append(create_linearblock(mlps[-2], mlps[-1], act_args=None))
         self.head = nn.Sequential(*heads)
+        # # TODO: first version
+        # self.mil_head = nn.Sequential(
+        #      nn.Dropout(p=0.5),
+        #      nn.Linear(in_features=256, out_features=num_classes, bias=True))
+        ###########################################
+        self.mil_head = nn.Sequential(
+               nn.Sequential(
+                   nn.Linear(in_features=1024, out_features=512, bias=False),
+                    nn.BatchNorm1d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+                   nn.ReLU(inplace=True)
+               ),
+               nn.Dropout(p=0.5, inplace=False),
+               nn.Sequential(
+                   nn.Linear(in_features=512, out_features=256, bias=False),
+                   nn.BatchNorm1d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+                   nn.ReLU(inplace=True)
+               ),
+               nn.Dropout(p=0.5, inplace=False),
+               nn.Sequential(
+                   nn.Linear(in_features=256, out_features=num_classes, bias=True)
+               )
+           )
 
+        # self.mil_head = nn.Sequential(
+        #     nn.Sequential(
+        #         nn.Linear(in_features=544, out_features=544, bias=False),
+        #         nn.BatchNorm1d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+        #         nn.ReLU(inplace=True)
+        #     ),
+        #     nn.Dropout(p=0.5, inplace=False),
+        #     nn.Sequential(
+        #         nn.Linear(in_features=544, out_features=256, bias=False),
+        #         nn.BatchNorm1d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+        #         nn.ReLU(inplace=True)
+        #     ),
+        #     nn.Dropout(p=0.5, inplace=False),
+        #     nn.Sequential(
+        #         nn.Linear(in_features=256, out_features=num_classes, bias=True)
+        #     )
+        # )
+
+        # self.mil_head_att = nn.Sequential(
+        #     nn.Sequential(
+        #         nn.Linear(in_features=544, out_features=544, bias=False),
+        #         nn.BatchNorm1d(544, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+        #         nn.ReLU(inplace=True)
+        #     ),
+        #     nn.Dropout(p=0.5, inplace=False),
+        #     nn.Sequential(
+        #         nn.Linear(in_features=544, out_features=256, bias=False),
+        #         nn.BatchNorm1d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+        #         nn.ReLU(inplace=True)
+        #     ),
+        #     nn.Dropout(p=0.5, inplace=False),
+        #     nn.Sequential(
+        #         nn.Linear(in_features=256, out_features=num_classes, bias=True)
+        #     )
+        # )
+        self.attention_head = nn.Sequential(
+            nn.Linear(1024, 8),
+            nn.Tanh(),
+            nn.Linear(8, 1),
+            nn.Sigmoid(),
+        )
+        self.pooling = pooling
+        self.is_mil = is_mil
+        self.num_classes = num_classes
+        if self.pooling == 'gap':
+            self.bag_out = nn.Linear(544, num_classes)
+
+    def interpret(self, x):
+        return x['interpretation']
 
     def forward(self, end_points):
+        # print(end_points.shape)
         if self.global_feat is not None:
             global_feats = []
             for preprocess in self.global_feat:
@@ -132,5 +209,48 @@ class ClsHead(nn.Module):
                 elif preprocess in ['avg', 'mean']:
                     global_feats.append(torch.mean(end_points, dim=self.point_dim, keepdim=False))
             end_points = torch.cat(global_feats, dim=1)
-        logits = self.head(end_points)
+
+        if self.is_mil:
+            if self.pooling == 'gap':
+                cam = self.bag_out.weight @ end_points
+                bag_logits = self.bag_out(end_points.mean(dim=-1))
+                return bag_logits
+                # return {"bag_logits": bag_logits,
+                #         "interpretation": cam}
+
+            if self.pooling == 'attention':
+                attention = self.attention_head(end_points.transpose(2, 1))
+                bag_embedding = torch.mean(end_points.transpose(2, 1) * attention, dim=1)
+                bag_logits = self.mil_head_att(bag_embedding)
+                return bag_logits
+            #     return {"bag_logits": bag_logits,
+            #     "interpretation": attention.repeat(1, 1, self.num_classes).transpose(
+            #     2, 1
+            # ),}
+
+            elif self.pooling == 'additive':
+                attention = self.attention_head(end_points.transpose(2, 1))
+                instance_logits = self.mil_head(end_points.transpose(2, 1) * attention)
+                bag_logits = torch.mean(instance_logits, dim=1)
+                return bag_logits
+                # return {"bag_logits": bag_logits,
+                #         "interpretation": (instance_logits * attention).transpose(2, 1)}
+
+            elif self.pooling == 'conjunctive':
+                attention = self.attention_head(end_points.transpose(2, 1))
+                instance_logits = self.mil_head(end_points.transpose(2, 1))
+                weighted_instance_logits = instance_logits * attention
+                bag_logits = torch.mean(weighted_instance_logits, dim=1)
+                return bag_logits
+                # return {"interpretation": weighted_instance_logits.transpose(2, 1),
+                #         "bag_logits": bag_logits}
+
+            elif self.pooling == 'instance':
+                instance_logits = self.mil_head(end_points.transpose(2, 1))
+                # return torch.mean(instance_logits, dim=1)
+                return {"bag_logits": torch.mean(instance_logits, dim=1),
+                        "interpretation": instance_logits.transpose(2, 1),}
+
+        else:
+            logits = self.head(end_points)
         return logits

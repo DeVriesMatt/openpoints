@@ -37,7 +37,7 @@ class ScanObjectNNHardest(Dataset):
     gravity_dim = 1
 
     def __init__(self, data_dir, split,
-                 num_points=2048,
+                 num_points=1024,
                  uniform_sample=True,
                  transform=None,
                  **kwargs):
