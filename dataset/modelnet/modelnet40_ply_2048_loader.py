@@ -16,6 +16,9 @@ from torch.utils.data import Dataset
 from torchvision.datasets.utils import extract_archive, check_integrity
 from ..build import DATASETS
 import pandas as pd
+from sklearn import preprocessing
+from pyntcloud import PyntCloud
+
 
 
 def download_and_extract_archive(url, path, md5=None):
@@ -394,6 +397,141 @@ class RBC(Dataset):
         #     data = self.transform(data)
 
         data['x'] = data['pos']
+
+        if self.cls_state:
+            return data
+        else:
+            return data
+
+
+def farthest_point_sample(point, npoint):
+    """
+    Input:
+        xyz: pointcloud data, [N, D]
+        npoint: number of samples
+    Return:
+        centroids: sampled pointcloud index, [npoint, D]
+    """
+    N, D = point.shape
+    xyz = point[:, :3]
+    centroids = np.zeros((npoint,))
+    distance = np.ones((N,)) * 1e10
+    farthest = np.random.randint(0, N)
+    for i in range(npoint):
+        centroids[i] = farthest
+        centroid = xyz[farthest, :]
+        dist = np.sum((xyz - centroid) ** 2, -1)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = np.argmax(distance, -1)
+    point = point[centroids.astype(np.int32)]
+    return point
+
+@DATASETS.register_module()
+class Drugs(Dataset):
+    """
+    This is the data loader for the RBC dataset.
+    RBC dataset contains annotated point clouds for classification and segmentation.
+    Args:
+        data_dir: Path to the directory containing point cloud data.
+        num_points: Number of points per sample (default: 2048).
+        split: Data split mode (train/test/all).
+        cls_state: Whether to load data with classification labels (default: True).
+        transform: Data augmentation or transformation to apply.
+        choice: Fold choice for cross-validation.
+    """
+    classes = ['Binimetinib',
+               'Blebbistatin',
+               'CK666',
+               'DMSO',
+               'H1152',
+               'MK1775',
+               'Nocodazole',
+               'No Treatment',
+               'Palbocyclib',
+               'PF228'
+               ]
+    def __init__(self,
+                 data_dir=None,
+                 num_points=1024,
+                 split="train",
+                 cls_state=True,
+                 transform=None,
+                 choice=0,
+                 inference=False):
+        assert data_dir is not None, "data_dir cannot be None"
+        self.num_points = num_points
+        self.cls_state = cls_state
+        self.split = split
+        self.transform = transform
+        self.datapath = []
+        self.partition = split
+        self.data_dir = data_dir
+        self.inference = inference
+
+
+        self.annot_df = pd.read_csv(os.path.join(data_dir, f"new_drugs_convext_hull_distal/fold0.csv"))
+
+        if self.partition != "all":
+            self.new_df = self.annot_df[(self.annot_df.Splits == self.partition) &
+                                        ((self.annot_df.Treatment == "No Treatment") |
+                                         (self.annot_df.Treatment == "Nocodazole") |
+                                         (self.annot_df.Treatment == "Blebbistatin"))
+                                         # (self.annot_df.Treatment == "Binimetinib"))
+            ].reset_index(drop=True)
+        else:
+            self.new_df = self.annot_df.reset_index(drop=True)
+
+        self.le = preprocessing.LabelEncoder()
+        self.le.fit(self.new_df["Treatment"].values)
+
+    def __len__(self):
+        return len(self.new_df)
+
+    def __getitem__(self, idx):
+        # read the image
+        treatment = self.new_df.loc[idx, "Treatment"]
+        # class_id = self.new_df.loc[idx, "Class"]
+        plate_num = "Plate" + str(self.new_df.loc[idx, "PlateNumber"])
+        # Always load 4096 points
+        num_str = '_4096'
+
+        component_path = "stacked_pointcloud" + num_str
+
+        img_path = os.path.join(
+            self.data_dir,
+            plate_num,
+            component_path,
+            treatment,
+            self.new_df.loc[idx, "serialNumber"],
+        )
+        image = PyntCloud.from_file(img_path + ".ply")
+        point_set = image.points.values
+
+        if point_set.shape[0] < self.num_points:
+            choice = np.random.choice(point_set.shape[0], self.num_points, replace=True)
+            point_set = point_set[choice, :]
+        else:
+            point_set = farthest_point_sample(point_set, self.num_points)
+
+
+        # Normalize to unit ball
+        point_set[:, :3] -= np.mean(point_set[:, :3], axis=0)
+        dist = np.max(np.sqrt(np.sum(point_set[:, :3] ** 2, axis=1)))
+        point_set[:, :3] /= dist
+
+        cls = torch.squeeze(torch.tensor(self.le.transform([treatment])))
+
+        data = {'pos': point_set, 'y': cls}
+        # if self.transform is not None:
+        #     data = self.transform(data)
+
+        data['x'] = data['pos']
+        if self.inference:
+            data['serial'] = self.new_df.loc[idx, "serialNumber"]
+            data['Treatment'] = treatment
+        # data['serial'] = self.new_df.loc[idx, "serialNumber"]
+        # data['Treatment'] = treatment
 
         if self.cls_state:
             return data

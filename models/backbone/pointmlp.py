@@ -345,7 +345,7 @@ class PointMLPEncoder(nn.Module):
             p, x = self.local_grouper_list[i](p, x.permute(0, 2, 1))  # [b,g,3]  [b,g,k,d]
             x = self.pre_blocks_list[i](x)  # [b,d,g]
             x = self.pos_blocks_list[i](x)  # [b,d,g]
-        x = F.adaptive_max_pool1d(x, 1).squeeze(dim=-1)
+        # x = F.adaptive_max_pool1d(x, 1).squeeze(dim=-1)
         return x
 
 

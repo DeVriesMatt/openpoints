@@ -12,6 +12,7 @@ import torch.nn as nn
 from ..build import MODELS
 from ..layers import create_convblock1d, create_convblock2d, create_act, CHANNEL_MAP, \
     create_grouper, furthest_point_sample, random_sample, three_interpolation, get_aggregation_feautres
+from .curvenet import *
 
 
 def get_reduction_fn(reduction):
@@ -934,19 +935,19 @@ class TransformerBlock(nn.Module):
         self.mlp_v = nn.Conv1d(C_in, dim_v, 1, bias=False)
         self.mlp_k = nn.Conv1d(C_in, dim_k, 1, bias=False)
         self.mlp_q = nn.Conv1d(ch_raise, heads * dim_k, 1, bias=False)
-        self.mlp_h = nn.Conv2d(4, dim_v, 1, bias=False)
+        self.mlp_h = nn.Conv2d(3, dim_v, 1, bias=False)
 
         self.bn_value = nn.BatchNorm1d(dim_v)
         self.bn_query = nn.BatchNorm1d(heads * dim_k)
 
     def forward(self, x):
         # print("##############################################")
-        n_samples = 1024
-        xyz = x[..., :4]
+        n_samples = x.shape[1]
+        xyz = x[..., :3]
         if not self.use_norm:
             feature = xyz
         else:
-            feature = x[..., 4:]
+            feature = x[..., 3:]
 
         bs = xyz.shape[0]
 
@@ -1276,7 +1277,7 @@ class MedPTFeatureExtractor(nn.Module):
 
         # transformer layer
         self.tf1 = trans_block(
-            4,
+            3,
             channel_dim[0],
             n_samples=self.num_points,
             K=num_K[0],
@@ -1329,6 +1330,78 @@ class MedPTFeatureExtractor(nn.Module):
 
         return feature
 
+@MODELS.register_module()
+class CurveNetNoDown(nn.Module):
+    def __init__(self, num_classes=40, k=20, setting='default', is_mil=True,  **kwargs):
+        super(CurveNetNoDown, self).__init__()
+
+        assert setting in curve_config
+        self.in_channels = kwargs.get('in_channels', 3)
+
+        additional_channel = 32
+        self.lpfa = LPFA(9, additional_channel, k=k, mlp_num=1, initial=True)
+
+        # encoder
+        self.cic11 = CIC(npoint=1024, radius=0.05, k=k, in_channels=additional_channel, output_channels=64,
+                         bottleneck_ratio=2, mlp_num=1, curve_config=curve_config[setting][0])
+        self.cic12 = CIC(npoint=1024, radius=0.05, k=k, in_channels=64, output_channels=64, bottleneck_ratio=4,
+                         mlp_num=1, curve_config=curve_config[setting][0])
+
+        self.cic21 = CIC(npoint=1024, radius=0.05, k=k, in_channels=64, output_channels=128, bottleneck_ratio=2,
+                         mlp_num=1, curve_config=curve_config[setting][1])
+        self.cic22 = CIC(npoint=1024, radius=0.1, k=k, in_channels=128, output_channels=128, bottleneck_ratio=4,
+                         mlp_num=1, curve_config=curve_config[setting][1])
+
+        self.cic31 = CIC(npoint=1024, radius=0.1, k=k, in_channels=128, output_channels=256, bottleneck_ratio=2,
+                         mlp_num=1, curve_config=curve_config[setting][2])
+        self.cic32 = CIC(npoint=1024, radius=0.2, k=k, in_channels=256, output_channels=256, bottleneck_ratio=4,
+                         mlp_num=1, curve_config=curve_config[setting][2])
+
+        self.cic41 = CIC(npoint=1024, radius=0.2, k=k, in_channels=256, output_channels=512, bottleneck_ratio=2,
+                         mlp_num=1, curve_config=curve_config[setting][3])
+        self.cic42 = CIC(npoint=1024, radius=0.4, k=k, in_channels=512, output_channels=512, bottleneck_ratio=4,
+                         mlp_num=1, curve_config=curve_config[setting][3])
+
+        self.conv0 = nn.Sequential(
+             nn.Conv1d(512, 1024, kernel_size=1, bias=False),
+             nn.BatchNorm1d(1024),
+             nn.ReLU(inplace=True))
+        self.conv1 = nn.Linear(1024, 512, bias=False)
+        self.conv2 = nn.Linear(512, num_classes)
+        self.bn1 = nn.BatchNorm1d(1024)
+        self.dp1 = nn.Dropout(p=0.5)
+
+
+        self.is_mil = is_mil
+        self.maxpool = lambda x: torch.max(x, dim=-1, keepdim=False)[0]
+        self.avgpool = lambda x: torch.mean(x, dim=-1, keepdim=False)
+
+
+    def forward_cls_feat(self, p):
+        if hasattr(p, 'keys'):
+            p, x = p['pos'], p.get('x', None)
+        if x is None:
+            x = p.transpose(1, 2).contiguous()
+        xyz = x
+        l0_points = self.lpfa(xyz, xyz)
+
+        l1_xyz, l1_points = self.cic11(xyz, l0_points)
+        l1_xyz, l1_points = self.cic12(l1_xyz, l1_points)
+
+        l2_xyz, l2_points = self.cic21(l1_xyz, l1_points)
+        l2_xyz, l2_points = self.cic22(l2_xyz, l2_points)
+
+        l3_xyz, l3_points = self.cic31(l2_xyz, l2_points)
+        l3_xyz, l3_points = self.cic32(l3_xyz, l3_points)
+
+        l4_xyz, l4_points = self.cic41(l3_xyz, l3_points)
+        l4_xyz, l4_points = self.cic42(l4_xyz, l4_points)
+
+        x = self.conv0(l4_points)
+        if self.is_mil:
+            return x
+        else:
+            return torch.cat((self.maxpool(x), self.avgpool(x)), dim=1)
 
 
 if __name__ == "__main__":

@@ -155,8 +155,8 @@ class PointNetEncoder(nn.Module):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = self.bn3(self.conv3(x))
-        x = torch.max(x, 2, keepdim=True)[0]
-        x = x.view(-1, 1024)
+        # x = torch.max(x, 2, keepdim=True)[0]
+        # x = x.view(-1, 1024)
         return x
 
     def forward_seg_feat(self, pos, x=None):
